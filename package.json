@@ -1,0 +1,50 @@
+{
+  "name": "api-whatsapp",
+  "version": "0.0.1",
+  "description": "API de WhatsApp (Baileys) para o sistema de pedidos",
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "nest build",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:prod": "node dist/main",
+    "db:init": "prisma db execute --schema prisma/schema.prisma --file prisma/init.sql && prisma generate",
+    "prisma:generate": "prisma generate"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/microservices": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/swagger": "^11.2.0",
+    "@prisma/client": "^6.11.0",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "amqp-connection-manager": "^4.1.14",
+    "amqplib": "^0.10.4",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "dotenv": "^17.0.1",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@types/amqplib": "^0.10.5",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.7",
+    "@types/qrcode": "^1.5.5",
+    "prisma": "^6.11.0",
+    "ts-loader": "^9.5.2",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,22 @@
+# compiled output
+/dist
+/node_modules
+/build
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# IDE - VSCode
+.vscode/*
+
+# dotenv environment variable files
+.env
+.env.local
+
+# temp
+.temp
+.tmp

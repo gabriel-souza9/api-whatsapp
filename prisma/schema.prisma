@@ -1,0 +1,33 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model WhatsappSession {
+  accountId   Int      @id
+  status      String   @default("DISCONNECTED")
+  qr          String?
+  phoneNumber String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  authKeys WhatsappAuthKey[]
+
+  @@map("whatsapp_session")
+}
+
+model WhatsappAuthKey {
+  id        Int    @id @default(autoincrement())
+  accountId Int
+  key       String
+  value     Json
+
+  session WhatsappSession @relation(fields: [accountId], references: [accountId], onDelete: Cascade)
+
+  @@unique([accountId, key])
+  @@map("whatsapp_auth_key")
+}
