@@ -10,6 +10,7 @@ import pino from 'pino';
 import * as QRCode from 'qrcode';
 import { PrismaService } from '../prisma/prisma.service';
 import { usePostgresAuthState } from './postgres-auth';
+import { SessionEventsService } from './session-events.service';
 import {
   SendMediaInput,
   SessionState,
@@ -22,7 +23,10 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
   private readonly sockets = new Map<number, WASocket>();
   private readonly starting = new Set<number>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sessionEvents: SessionEventsService,
+  ) {}
 
   // Reconecta sessões que estavam conectadas antes de reiniciar o serviço.
   async onModuleInit() {
@@ -49,6 +53,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         create: { accountId, status: 'CONNECTING' },
         update: { status: 'CONNECTING' },
       });
+      this.emitSession(accountId);
 
       const { state, saveCreds } = await usePostgresAuthState(accountId, this.prisma);
 
@@ -81,6 +86,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         where: { accountId },
         data: { status: 'QR', qr: dataUrl },
       });
+      this.emitSession(accountId);
     }
 
     if (connection === 'open') {
@@ -91,6 +97,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         data: { status: 'CONNECTED', qr: null, phoneNumber },
       });
       this.logger.log(`Conta ${accountId} conectada (${phoneNumber})`);
+      this.emitSession(accountId);
     }
 
     if (connection === 'close') {
@@ -105,6 +112,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
           data: { status: 'DISCONNECTED', qr: null, phoneNumber: null },
         });
         this.logger.warn(`Conta ${accountId} deslogada`);
+        this.emitSession(accountId);
         return;
       }
 
@@ -113,6 +121,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         data: { status: 'DISCONNECTED' },
       });
       this.logger.warn(`Conta ${accountId} desconectada, reconectando...`);
+      this.emitSession(accountId);
       this.start(accountId).catch((e) =>
         this.logger.error(`Erro ao reconectar conta ${accountId}: ${e?.message}`),
       );
@@ -148,6 +157,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       create: { accountId, status: 'DISCONNECTED' },
       update: { status: 'DISCONNECTED', qr: null, phoneNumber: null },
     });
+    this.emitSession(accountId);
   }
 
   async getStatus(accountId: number): Promise<SessionState> {
@@ -217,5 +227,11 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     if (to.includes('@')) return to;
     const digits = to.replace(/\D/g, '');
     return `${digits}@s.whatsapp.net`;
+  }
+
+  private emitSession(accountId: number) {
+    this.getStatus(accountId)
+      .then((state) => this.sessionEvents.emit(state))
+      .catch((e) => this.logger.warn(`Falha ao emitir sessão ${accountId}: ${e?.message}`));
   }
 }
