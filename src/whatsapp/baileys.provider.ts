@@ -4,6 +4,7 @@ import makeWASocket, {
   AnyMessageContent,
   Browsers,
   DisconnectReason,
+  fetchLatestBaileysVersion,
   WASocket,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
@@ -22,21 +23,30 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
   private readonly logger = new Logger(BaileysProvider.name);
   private readonly sockets = new Map<number, WASocket>();
   private readonly starting = new Set<number>();
+  private readonly reconnectTimers = new Map<number, NodeJS.Timeout>();
+  private readonly reconnectAttempts = new Map<number, number>();
+  private readonly saveCredsHandlers = new Map<number, () => Promise<void>>();
+  private cachedVersion: [number, number, number] | null = null;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 12;
+  private static readonly WATCHDOG_INTERVAL_MS = 60_000;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly sessionEvents: SessionEventsService,
   ) {}
 
-  // Reconecta sessões que estavam conectadas antes de reiniciar o serviço.
+  // Reconecta sessões com credenciais salvas ao subir o serviço.
   async onModuleInit() {
-    const sessions = await this.prisma.whatsappSession.findMany({
-      where: { status: 'CONNECTED' },
-      select: { accountId: true },
+    const credsRows = await this.prisma.whatsappAuthKey.findMany({
+      where: { key: 'creds' },
+      select: { accountId: true, value: true },
     });
-    for (const { accountId } of sessions) {
-      this.start(accountId).catch((e) =>
-        this.logger.warn(`Falha ao reconectar conta ${accountId}: ${e?.message}`),
+
+    for (const row of credsRows) {
+      const registered = Boolean((row.value as { registered?: boolean })?.registered);
+      if (!registered) continue;
+      this.start(row.accountId).catch((e) =>
+        this.logger.warn(`Falha ao reconectar conta ${row.accountId}: ${e?.message}`),
       );
     }
   }
@@ -56,16 +66,24 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       this.emitSession(accountId);
 
       const { state, saveCreds } = await usePostgresAuthState(accountId, this.prisma);
+      const version = await this.getWaVersion();
+      const hasPersistedCreds = Boolean(state.creds?.registered);
+      this.logger.log(
+        `Conta ${accountId}: iniciando sessão (${hasPersistedCreds ? 'credenciais salvas' : 'sessão nova, vai gerar QR'})`,
+      );
 
       const sock = makeWASocket({
         auth: state,
+        version,
         logger: pino({ level: 'silent' }) as any,
-        browser: Browsers.ubuntu('Pedidos'),
+        browser: Browsers.windows('Chrome'),
         markOnlineOnConnect: false,
         syncFullHistory: false,
+        shouldSyncHistoryMessage: () => false,
       });
 
       this.sockets.set(accountId, sock);
+      this.saveCredsHandlers.set(accountId, saveCreds);
       sock.ev.on('creds.update', saveCreds);
       sock.ev.on('connection.update', (update) =>
         this.handleConnectionUpdate(accountId, update),
@@ -77,10 +95,134 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     return this.getStatus(accountId);
   }
 
+  private async getWaVersion(): Promise<[number, number, number]> {
+    if (!this.cachedVersion) {
+      const { version } = await fetchLatestBaileysVersion();
+      this.cachedVersion = version;
+      this.logger.log(`Versão WA Web: ${version.join('.')}`);
+    }
+    return this.cachedVersion;
+  }
+
+  private getDisconnectCode(lastDisconnect: any): number | undefined {
+    const error = lastDisconnect?.error;
+    if (!error) return undefined;
+
+    const boom = error as Boom;
+    if (boom.output?.statusCode) return boom.output.statusCode;
+    if ((error as { status?: number }).status) return (error as { status: number }).status;
+    if ((error as { statusCode?: number }).statusCode) {
+      return (error as { statusCode: number }).statusCode;
+    }
+
+    const message = String(error.message || '');
+    const match = message.match(/\b(40[0-9]|428|440|500|503|515)\b/);
+    return match ? Number(match[1]) : undefined;
+  }
+
+  private formatDisconnectError(lastDisconnect: any): string {
+    const error = lastDisconnect?.error;
+    if (!error) return 'sem detalhe';
+    const parts = [error.name, error.message].filter(Boolean);
+    return parts.join(': ') || 'erro desconhecido';
+  }
+
+  private async hasRegisteredCreds(accountId: number): Promise<boolean> {
+    const row = await this.prisma.whatsappAuthKey.findUnique({
+      where: { accountId_key: { accountId, key: 'creds' } },
+    });
+    return Boolean((row?.value as { registered?: boolean })?.registered);
+  }
+
+  private async shouldReconnect(accountId: number, code: number | undefined): Promise<boolean> {
+    if (code === DisconnectReason.loggedOut) return false;
+
+    const permanentCodes = [
+      DisconnectReason.forbidden,
+      DisconnectReason.badSession,
+      DisconnectReason.multideviceMismatch,
+      DisconnectReason.connectionReplaced,
+      DisconnectReason.unavailableService,
+    ];
+    if (code != null && permanentCodes.includes(code)) return false;
+
+    return this.hasRegisteredCreds(accountId);
+  }
+
+  private getReconnectDelay(code: number | undefined, attempt: number, watchdog = false): number {
+    if (watchdog) return BaileysProvider.WATCHDOG_INTERVAL_MS;
+    if (code === DisconnectReason.restartRequired) return 1500;
+    if (
+      code === DisconnectReason.timedOut ||
+      code === DisconnectReason.connectionLost ||
+      code === DisconnectReason.connectionClosed
+    ) {
+      return Math.min(3000 * attempt, 20_000);
+    }
+    return Math.min(2000 * attempt, 15_000);
+  }
+
+  private clearReconnectTimer(accountId: number) {
+    const timer = this.reconnectTimers.get(accountId);
+    if (timer) {
+      clearTimeout(timer);
+      this.reconnectTimers.delete(accountId);
+    }
+  }
+
+  private scheduleReconnect(
+    accountId: number,
+    delayMs: number,
+    code?: number,
+    watchdog = false,
+  ) {
+    this.clearReconnectTimer(accountId);
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(accountId);
+      this.start(accountId).catch((e) =>
+        this.logger.error(`Erro ao reconectar conta ${accountId}: ${e?.message}`),
+      );
+    }, delayMs);
+    this.reconnectTimers.set(accountId, timer);
+    if (watchdog) {
+      this.logger.log(
+        `Conta ${accountId}: watchdog ativo, nova tentativa em ${delayMs / 1000}s`,
+      );
+    } else {
+      const attempt = this.reconnectAttempts.get(accountId) ?? 0;
+      this.logger.log(
+        `Conta ${accountId}: reconectando em ${delayMs / 1000}s (tentativa ${attempt}, code=${code ?? 'unknown'})`,
+      );
+    }
+  }
+
+  private closeSocket(accountId: number) {
+    const sock = this.sockets.get(accountId);
+    if (!sock) return;
+    try {
+      sock.end(undefined);
+    } catch {
+      // ignore
+    }
+    this.sockets.delete(accountId);
+    this.saveCredsHandlers.delete(accountId);
+  }
+
   private async handleConnectionUpdate(accountId: number, update: any) {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect, qr, isNewLogin } = update;
+
+    if (isNewLogin) {
+      this.logger.log(`Conta ${accountId}: login concluído, salvando credenciais`);
+      const saveCreds = this.saveCredsHandlers.get(accountId);
+      if (saveCreds) {
+        await saveCreds().catch((e) =>
+          this.logger.warn(`Conta ${accountId}: falha ao salvar credenciais: ${e?.message}`),
+        );
+      }
+    }
 
     if (qr) {
+      this.logger.log(`Conta ${accountId}: novo QR Code gerado`);
       const dataUrl = await QRCode.toDataURL(qr);
       await this.prisma.whatsappSession.update({
         where: { accountId },
@@ -90,6 +232,8 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     }
 
     if (connection === 'open') {
+      this.clearReconnectTimer(accountId);
+      this.reconnectAttempts.delete(accountId);
       const sock = this.sockets.get(accountId);
       const phoneNumber = sock?.user?.id?.split(':')[0]?.split('@')[0] ?? null;
       await this.prisma.whatsappSession.update({
@@ -101,11 +245,17 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     }
 
     if (connection === 'close') {
-      this.sockets.delete(accountId);
-      const code = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
+      this.closeSocket(accountId);
+      const code = this.getDisconnectCode(lastDisconnect);
+      const errorDetail = this.formatDisconnectError(lastDisconnect);
 
-      if (loggedOut) {
+      this.logger.warn(
+        `Conta ${accountId} desconectada (code=${code ?? 'unknown'}, ${errorDetail})`,
+      );
+
+      if (code === DisconnectReason.loggedOut) {
+        this.clearReconnectTimer(accountId);
+        this.reconnectAttempts.delete(accountId);
         await this.prisma.whatsappAuthKey.deleteMany({ where: { accountId } });
         await this.prisma.whatsappSession.update({
           where: { accountId },
@@ -116,32 +266,57 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         return;
       }
 
+      if (!(await this.shouldReconnect(accountId, code))) {
+        this.clearReconnectTimer(accountId);
+        this.reconnectAttempts.delete(accountId);
+        await this.prisma.whatsappSession.update({
+          where: { accountId },
+          data: { status: 'DISCONNECTED', qr: null },
+        });
+        this.emitSession(accountId);
+        return;
+      }
+
+      const attempt = (this.reconnectAttempts.get(accountId) ?? 0) + 1;
+      if (attempt > BaileysProvider.MAX_RECONNECT_ATTEMPTS) {
+        this.reconnectAttempts.set(accountId, attempt);
+        await this.prisma.whatsappSession.update({
+          where: { accountId },
+          data: { status: 'CONNECTING', qr: null },
+        });
+        this.emitSession(accountId);
+        this.scheduleReconnect(
+          accountId,
+          BaileysProvider.WATCHDOG_INTERVAL_MS,
+          code,
+          true,
+        );
+        return;
+      }
+
+      this.reconnectAttempts.set(accountId, attempt);
+      const delayMs = this.getReconnectDelay(code, attempt);
+
       await this.prisma.whatsappSession.update({
         where: { accountId },
-        data: { status: 'DISCONNECTED' },
+        data: { status: 'CONNECTING', qr: null },
       });
-      this.logger.warn(`Conta ${accountId} desconectada, reconectando...`);
       this.emitSession(accountId);
-      this.start(accountId).catch((e) =>
-        this.logger.error(`Erro ao reconectar conta ${accountId}: ${e?.message}`),
-      );
+      this.scheduleReconnect(accountId, delayMs, code);
     }
   }
 
   async restart(accountId: number): Promise<SessionState> {
-    const sock = this.sockets.get(accountId);
-    if (sock) {
-      try {
-        sock.end(undefined);
-      } catch {
-        // ignore
-      }
-      this.sockets.delete(accountId);
-    }
+    this.clearReconnectTimer(accountId);
+    this.reconnectAttempts.delete(accountId);
+    this.closeSocket(accountId);
     return this.start(accountId);
   }
 
   async logout(accountId: number): Promise<void> {
+    this.clearReconnectTimer(accountId);
+    this.reconnectAttempts.delete(accountId);
+    this.saveCredsHandlers.delete(accountId);
     const sock = this.sockets.get(accountId);
     if (sock) {
       try {

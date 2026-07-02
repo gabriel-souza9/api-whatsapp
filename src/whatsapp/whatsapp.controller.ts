@@ -31,8 +31,9 @@ export class WhatsappController {
   }
 
   @Delete('sessions/:accountId')
-  logout(@Param('accountId', ParseIntPipe) accountId: number) {
-    return this.provider.logout(accountId);
+  async logout(@Param('accountId', ParseIntPipe) accountId: number) {
+    await this.provider.logout(accountId);
+    return { ok: true };
   }
 
   @Get('sessions/:accountId/status')
