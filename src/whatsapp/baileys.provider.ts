@@ -17,6 +17,7 @@ import {
   SessionState,
   WhatsAppProvider,
 } from './providers/messaging-provider.interface';
+import { getBrazilianWhatsAppVariants, normalizePhone } from '../utils/normalizePhone';
 
 @Injectable()
 export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
@@ -385,7 +386,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
 
   async sendText(accountId: number, to: string, text: string): Promise<{ id: string }> {
     const sock = this.requireConnected(accountId);
-    const jid = this.toJid(to);
+    const jid = await this.resolveJid(sock, to);
     const sent = await sock.sendMessage(jid, { text });
     const id = sent?.key?.id ?? '';
     this.logger.log(
@@ -396,7 +397,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
 
   async sendMedia(accountId: number, input: SendMediaInput): Promise<{ id: string }> {
     const sock = this.requireConnected(accountId);
-    const jid = this.toJid(input.to);
+    const jid = await this.resolveJid(sock, input.to);
     const media = input.url ? { url: input.url } : Buffer.from(input.base64 ?? '', 'base64');
 
     let content: AnyMessageContent;
@@ -438,9 +439,33 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     return sock;
   }
 
+  private async resolveJid(sock: WASocket, to: string): Promise<string> {
+    if (to.includes('@')) return to;
+
+    const digits = normalizePhone(to);
+    const variants = getBrazilianWhatsAppVariants(digits);
+
+    try {
+      const results = await sock.onWhatsApp(...variants);
+      const found = results?.find((r) => r.exists);
+      if (found?.jid) {
+        if (found.jid.split('@')[0] !== variants[0]) {
+          this.logger.log(
+            `Número ${digits} resolvido como ${found.jid.split('@')[0]} (variante WhatsApp)`,
+          );
+        }
+        return found.jid;
+      }
+    } catch (e) {
+      this.logger.warn(`onWhatsApp falhou para ${digits}: ${(e as Error)?.message}`);
+    }
+
+    return `${variants[0]}@s.whatsapp.net`;
+  }
+
   private toJid(to: string): string {
     if (to.includes('@')) return to;
-    const digits = to.replace(/\D/g, '');
+    const digits = normalizePhone(to);
     return `${digits}@s.whatsapp.net`;
   }
 
