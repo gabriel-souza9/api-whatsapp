@@ -43,8 +43,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     });
 
     for (const row of credsRows) {
-      const registered = Boolean((row.value as { registered?: boolean })?.registered);
-      if (!registered) continue;
+      if (!(await this.canAutoReconnect(row.accountId))) continue;
       this.start(row.accountId).catch((e) =>
         this.logger.warn(`Falha ao reconectar conta ${row.accountId}: ${e?.message}`),
       );
@@ -127,11 +126,15 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     return parts.join(': ') || 'erro desconhecido';
   }
 
-  private async hasRegisteredCreds(accountId: number): Promise<boolean> {
+  private async canAutoReconnect(accountId: number): Promise<boolean> {
     const row = await this.prisma.whatsappAuthKey.findUnique({
       where: { accountId_key: { accountId, key: 'creds' } },
     });
-    return Boolean((row?.value as { registered?: boolean })?.registered);
+    const creds = row?.value as { registered?: boolean; me?: { id?: string } } | undefined;
+    if (creds?.registered || creds?.me?.id) return true;
+
+    const session = await this.prisma.whatsappSession.findUnique({ where: { accountId } });
+    return Boolean(session?.phoneNumber);
   }
 
   private async shouldReconnect(accountId: number, code: number | undefined): Promise<boolean> {
@@ -142,16 +145,20 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       DisconnectReason.badSession,
       DisconnectReason.multideviceMismatch,
       DisconnectReason.connectionReplaced,
-      DisconnectReason.unavailableService,
     ];
     if (code != null && permanentCodes.includes(code)) return false;
 
-    return this.hasRegisteredCreds(accountId);
+    return this.canAutoReconnect(accountId);
   }
 
   private getReconnectDelay(code: number | undefined, attempt: number, watchdog = false): number {
     if (watchdog) return BaileysProvider.WATCHDOG_INTERVAL_MS;
-    if (code === DisconnectReason.restartRequired) return 1500;
+    if (
+      code === DisconnectReason.restartRequired ||
+      code === DisconnectReason.unavailableService
+    ) {
+      return 1500;
+    }
     if (
       code === DisconnectReason.timedOut ||
       code === DisconnectReason.connectionLost ||
@@ -175,11 +182,13 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     delayMs: number,
     code?: number,
     watchdog = false,
+    useRestart = false,
   ) {
     this.clearReconnectTimer(accountId);
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(accountId);
-      this.start(accountId).catch((e) =>
+      const action = useRestart ? this.restart(accountId) : this.start(accountId);
+      action.catch((e) =>
         this.logger.error(`Erro ao reconectar conta ${accountId}: ${e?.message}`),
       );
     }, delayMs);
@@ -234,6 +243,12 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     if (connection === 'open') {
       this.clearReconnectTimer(accountId);
       this.reconnectAttempts.delete(accountId);
+      const saveCreds = this.saveCredsHandlers.get(accountId);
+      if (saveCreds) {
+        await saveCreds().catch((e) =>
+          this.logger.warn(`Conta ${accountId}: falha ao salvar credenciais: ${e?.message}`),
+        );
+      }
       const sock = this.sockets.get(accountId);
       const phoneNumber = sock?.user?.id?.split(':')[0]?.split('@')[0] ?? null;
       await this.prisma.whatsappSession.update({
@@ -269,11 +284,26 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       if (!(await this.shouldReconnect(accountId, code))) {
         this.clearReconnectTimer(accountId);
         this.reconnectAttempts.delete(accountId);
+        this.logger.warn(
+          `Conta ${accountId}: reconexão automática ignorada (code=${code ?? 'unknown'})`,
+        );
         await this.prisma.whatsappSession.update({
           where: { accountId },
           data: { status: 'DISCONNECTED', qr: null },
         });
         this.emitSession(accountId);
+        return;
+      }
+
+      if (code === DisconnectReason.unavailableService) {
+        this.reconnectAttempts.delete(accountId);
+        this.logger.log(`Conta ${accountId}: erro 503, reconectando automaticamente`);
+        await this.prisma.whatsappSession.update({
+          where: { accountId },
+          data: { status: 'CONNECTING', qr: null },
+        });
+        this.emitSession(accountId);
+        this.scheduleReconnect(accountId, 1500, code, false, true);
         return;
       }
 
@@ -355,12 +385,18 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
 
   async sendText(accountId: number, to: string, text: string): Promise<{ id: string }> {
     const sock = this.requireConnected(accountId);
-    const sent = await sock.sendMessage(this.toJid(to), { text });
-    return { id: sent?.key?.id ?? '' };
+    const jid = this.toJid(to);
+    const sent = await sock.sendMessage(jid, { text });
+    const id = sent?.key?.id ?? '';
+    this.logger.log(
+      `Conta ${accountId}: sendText: ${text} enviado para ${this.formatLogPhone(jid)} (id=${id}, ${text.length} chars)`,
+    );
+    return { id };
   }
 
   async sendMedia(accountId: number, input: SendMediaInput): Promise<{ id: string }> {
     const sock = this.requireConnected(accountId);
+    const jid = this.toJid(input.to);
     const media = input.url ? { url: input.url } : Buffer.from(input.base64 ?? '', 'base64');
 
     let content: AnyMessageContent;
@@ -386,8 +422,12 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
         throw new BadRequestException(`Tipo de mídia inválido: ${input.type}`);
     }
 
-    const sent = await sock.sendMessage(this.toJid(input.to), content);
-    return { id: sent?.key?.id ?? '' };
+    const sent = await sock.sendMessage(jid, content);
+    const id = sent?.key?.id ?? '';
+    this.logger.log(
+      `Conta ${accountId}: ${input.type}: ${JSON.stringify(content)} enviado para ${this.formatLogPhone(jid)} (id=${id})`,
+    );
+    return { id };
   }
 
   private requireConnected(accountId: number): WASocket {
@@ -402,6 +442,10 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     if (to.includes('@')) return to;
     const digits = to.replace(/\D/g, '');
     return `${digits}@s.whatsapp.net`;
+  }
+
+  private formatLogPhone(jidOrPhone: string): string {
+    return jidOrPhone.split('@')[0]?.replace(/\D/g, '') || jidOrPhone;
   }
 
   private emitSession(accountId: number) {

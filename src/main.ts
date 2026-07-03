@@ -5,6 +5,29 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import 'dotenv/config';
 import { AppModule } from './app.module';
 
+function suppressLibsignalConsoleNoise() {
+  const skip = (args: unknown[]) => {
+    const msg = args[0];
+    return (
+      typeof msg === 'string' &&
+      (msg.startsWith('Closing session:') ||
+        msg.startsWith('Opening session:') ||
+        msg === 'Session already closed' ||
+        msg === 'Session already open')
+    );
+  };
+
+  for (const method of ['info', 'warn'] as const) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      if (skip(args)) return;
+      original(...args);
+    };
+  }
+}
+
+suppressLibsignalConsoleNoise();
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors();
