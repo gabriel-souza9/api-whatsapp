@@ -3,9 +3,16 @@ WORKDIR /app
 
 RUN apk add --no-cache openssl python3 make g++
 
-COPY package.json package-lock.json ./
+COPY package.json ./
+COPY package-lock.json* yarn.lock* ./
 COPY prisma ./prisma
-RUN npm ci
+RUN if [ -f package-lock.json ] && [ -s package-lock.json ]; then \
+      npm ci; \
+    elif [ -f yarn.lock ]; then \
+      corepack enable && yarn install --frozen-lockfile; \
+    else \
+      npm install; \
+    fi
 
 COPY . .
 RUN npx prisma generate && npm run build
