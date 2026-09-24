@@ -18,6 +18,7 @@ import {
   WhatsAppProvider,
 } from './providers/messaging-provider.interface';
 import { getBrazilianWhatsAppVariants, normalizePhone } from '../utils/normalizePhone';
+import { InboundService } from './inbound/inbound.service';
 
 @Injectable()
 export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
@@ -34,6 +35,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly sessionEvents: SessionEventsService,
+    private readonly inbound: InboundService,
   ) {}
 
   // Reconecta sessões com credenciais salvas ao subir o serviço.
@@ -88,6 +90,10 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       sock.ev.on('connection.update', (update) =>
         this.handleConnectionUpdate(accountId, update),
       );
+      sock.ev.on('messages.upsert', ({ messages, type }) => {
+        if (type !== 'notify') return;
+        this.inbound.handleBaileysUpsert(accountId, messages, sock);
+      });
     } finally {
       this.starting.delete(accountId);
     }
@@ -101,7 +107,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       this.cachedVersion = version;
       this.logger.log(`Versão WA Web: ${version.join('.')}`);
     }
-    return this.cachedVersion;
+    return this.cachedVersion!;
   }
 
   private getDisconnectCode(lastDisconnect: any): number | undefined {
@@ -440,11 +446,23 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
   }
 
   private async resolveJid(sock: WASocket, to: string): Promise<string> {
+    // Já é JID (@lid ou @s.whatsapp.net) — usar direto (Baileys 7 prefere @lid).
     if (to.includes('@')) return to;
 
     const digits = normalizePhone(to);
-    const variants = getBrazilianWhatsAppVariants(digits);
+    const pnJid = `${digits}@s.whatsapp.net`;
 
+    try {
+      const lid = await (sock as any).signalRepository?.lidMapping?.getLIDForPN?.(pnJid);
+      if (typeof lid === 'string' && lid.endsWith('@lid')) {
+        this.logger.log(`Número ${digits} resolvido para LID ${lid.split('@')[0]}`);
+        return lid;
+      }
+    } catch (e) {
+      this.logger.warn(`getLIDForPN falhou para ${digits}: ${(e as Error)?.message}`);
+    }
+
+    const variants = getBrazilianWhatsAppVariants(digits);
     try {
       const results = await sock.onWhatsApp(...variants);
       const found = results?.find((r) => r.exists);
@@ -460,7 +478,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
       this.logger.warn(`onWhatsApp falhou para ${digits}: ${(e as Error)?.message}`);
     }
 
-    return `${variants[0]}@s.whatsapp.net`;
+    return pnJid;
   }
 
   private toJid(to: string): string {
