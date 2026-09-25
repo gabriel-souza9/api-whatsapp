@@ -395,6 +395,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
     const jid = await this.resolveJid(sock, to);
     const sent = await sock.sendMessage(jid, { text });
     const id = sent?.key?.id ?? '';
+    this.inbound.rememberOutgoing(accountId, id);
     this.logger.log(
       `Conta ${accountId}: sendText: ${text} enviado para ${this.formatLogPhone(jid)} (id=${id}, ${text.length} chars)`,
     );
@@ -431,6 +432,7 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
 
     const sent = await sock.sendMessage(jid, content);
     const id = sent?.key?.id ?? '';
+    this.inbound.rememberOutgoing(accountId, id);
     this.logger.log(
       `Conta ${accountId}: ${input.type}: ${JSON.stringify(content)} enviado para ${this.formatLogPhone(jid)} (id=${id})`,
     );

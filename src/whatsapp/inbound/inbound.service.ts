@@ -18,9 +18,37 @@ export class InboundService {
     private readonly prisma: PrismaService,
   ) {}
 
+  private readonly outgoingIds = new Map<string, number>();
+  private static readonly OUTGOING_TTL_MS = 10 * 60 * 1000;
+
+  /** Id enviado por esta sessão. O eco às vezes volta sem fromMe. */
+  rememberOutgoing(accountId: number, messageId: string) {
+    if (!messageId) return;
+    const now = Date.now();
+    if (this.outgoingIds.size > 500) {
+      for (const [key, expiresAt] of this.outgoingIds) {
+        if (expiresAt <= now) this.outgoingIds.delete(key);
+      }
+    }
+    this.outgoingIds.set(`${accountId}:${messageId}`, now + InboundService.OUTGOING_TTL_MS);
+  }
+
   handleBaileysUpsert(accountId: number, messages: any[], sock?: any) {
     for (const msg of messages) {
       try {
+        const remoteJid: string = msg?.key?.remoteJid || '';
+        if (remoteJid.endsWith('@g.us')) {
+          const text = peekText(msg);
+          if (text) this.logger.log(`conta ${accountId} | "${text}" | ignorada, grupo`);
+          continue;
+        }
+        if (this.isNotFromClient(accountId, msg, sock)) {
+          const text = peekText(msg);
+          if (text) {
+            this.logger.log(`conta ${accountId} | "${text}" | ignorada, não é do cliente`);
+          }
+          continue;
+        }
         const envelope = normalizeBaileysMessage(accountId, msg);
         if (!envelope) continue;
         void this.publishIfBotEnabled(envelope, sock);
@@ -100,4 +128,37 @@ export class InboundService {
       return false;
     }
   }
+
+  private isNotFromClient(accountId: number, msg: any, sock?: any): boolean {
+    const key = msg?.key;
+    if (!key?.id) return false;
+    if (key.fromMe) return true;
+
+    const sentAt = this.outgoingIds.get(`${accountId}:${key.id}`);
+    if (sentAt) {
+      if (sentAt > Date.now()) return true;
+      this.outgoingIds.delete(`${accountId}:${key.id}`);
+    }
+
+    const mine = userDigits(sock?.user?.id, sock?.user?.lid);
+    if (!mine.length) return false;
+
+    const authors = [key.participant, key.participantAlt, key.senderPn]
+      .map((value: string | undefined) => userDigits(value)[0])
+      .filter(Boolean);
+    return authors.some((author: string) => mine.includes(author));
+  }
+}
+
+function userDigits(...values: Array<string | null | undefined>): string[] {
+  return values
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .map((value) => value.split(':')[0].split('@')[0].replace(/\D/g, ''))
+    .filter(Boolean);
+}
+
+function peekText(msg: any): string {
+  const message = msg?.message;
+  const text = message?.conversation || message?.extendedTextMessage?.text || '';
+  return String(text).replace(/\s+/g, ' ').trim().slice(0, 80);
 }
