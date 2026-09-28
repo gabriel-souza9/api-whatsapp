@@ -19,6 +19,7 @@ import {
 } from './providers/messaging-provider.interface';
 import { getBrazilianWhatsAppVariants, normalizePhone } from '../utils/normalizePhone';
 import { InboundService } from './inbound/inbound.service';
+import { readAccountProvider } from './providers/account-provider';
 
 @Injectable()
 export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
@@ -134,6 +135,9 @@ export class BaileysProvider implements WhatsAppProvider, OnModuleInit {
   }
 
   private async canAutoReconnect(accountId: number): Promise<boolean> {
+    // Conta em WABA divide a linha de whatsapp_session (phoneNumber preenchido): não reabre Baileys.
+    if ((await readAccountProvider(this.prisma, accountId)) !== 'baileys') return false;
+
     const row = await this.prisma.whatsappAuthKey.findUnique({
       where: { accountId_key: { accountId, key: 'creds' } },
     });

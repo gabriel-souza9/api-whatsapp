@@ -1,23 +1,24 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   Get,
-  Inject,
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { SendMediaDto, SendTextDto } from './dto/send-message.dto';
-import {
-  WHATSAPP_PROVIDER,
-  WhatsAppProvider,
-} from './providers/messaging-provider.interface';
+import { MetaApiError } from './cloud/meta-errors';
+import { MessageLogService, ReportQuery } from './message-log.service';
+import { RoutingProvider } from './routing.provider';
 
 @Controller()
 export class WhatsappController {
   constructor(
-    @Inject(WHATSAPP_PROVIDER) private readonly provider: WhatsAppProvider,
+    private readonly provider: RoutingProvider,
+    private readonly messageLog: MessageLogService,
   ) {}
 
   @Post('sessions/:accountId/start')
@@ -51,7 +52,12 @@ export class WhatsappController {
     @Param('accountId', ParseIntPipe) accountId: number,
     @Body() dto: SendTextDto,
   ) {
-    return this.provider.sendText(accountId, dto.to, dto.text);
+    return this.asHttp(
+      this.messageLog.track(
+        { accountId, to: dto.to, kind: 'text', origin: 'test', body: dto.text },
+        () => this.provider.sendText(accountId, dto.to, dto.text),
+      ),
+    );
   }
 
   @Post('messages/:accountId/media')
@@ -59,6 +65,25 @@ export class WhatsappController {
     @Param('accountId', ParseIntPipe) accountId: number,
     @Body() dto: SendMediaDto,
   ) {
-    return this.provider.sendMedia(accountId, dto);
+    return this.asHttp(
+      this.messageLog.track(
+        { accountId, to: dto.to, kind: dto.type, origin: 'test', body: dto.caption || dto.url || '' },
+        () => this.provider.sendMedia(accountId, dto),
+      ),
+    );
+  }
+
+  @Get('messages/:accountId')
+  report(@Param('accountId', ParseIntPipe) accountId: number, @Query() query: ReportQuery) {
+    return this.messageLog.report(accountId, query);
+  }
+
+  private async asHttp<T>(promise: Promise<T>): Promise<T> {
+    try {
+      return await promise;
+    } catch (e) {
+      if (e instanceof MetaApiError) throw new BadRequestException(e.message);
+      throw e;
+    }
   }
 }

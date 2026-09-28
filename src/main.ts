@@ -4,6 +4,7 @@ import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import 'dotenv/config';
 import { AppModule } from './app.module';
+import { InternalKeyGuard } from './internal-key.guard';
 
 function suppressLibsignalConsoleNoise() {
   const skip = (args: unknown[]) => {
@@ -29,9 +30,11 @@ function suppressLibsignalConsoleNoise() {
 suppressLibsignalConsoleNoise();
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: assinatura X-Hub-Signature-256 do webhook da Meta é calculada sobre o corpo original.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableCors();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalGuards(new InternalKeyGuard());
 
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.RMQ,
@@ -44,7 +47,7 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('API WhatsApp')
-    .setDescription('API de WhatsApp (Baileys) para o sistema de pedidos')
+    .setDescription('API de WhatsApp (Baileys e Cloud API da Meta) para o sistema de pedidos')
     .setVersion('1.0')
     .build();
   const document = SwaggerModule.createDocument(app, config);

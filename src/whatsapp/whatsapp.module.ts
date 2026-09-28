@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { BaileysProvider } from './baileys.provider';
-import { WHATSAPP_PROVIDER } from './providers/messaging-provider.interface';
 import { WhatsappController } from './whatsapp.controller';
 import { WhatsappEventsController } from './whatsapp.events.controller';
 import { SessionEventsService } from './session-events.service';
@@ -9,6 +8,11 @@ import { SESSION_EVENTS_CLIENT } from './session-events.constants';
 import { INBOUND_EVENTS_CLIENT } from './inbound/inbound.constants';
 import { InboundPublisher } from './inbound/inbound.publisher';
 import { InboundService } from './inbound/inbound.service';
+import { CloudApiProvider } from './cloud/cloud-api.provider';
+import { CloudController } from './cloud/cloud.controller';
+import { CloudWebhookController } from './cloud/cloud-webhook.controller';
+import { MessageLogService } from './message-log.service';
+import { RoutingProvider } from './routing.provider';
 
 @Module({
   imports: [
@@ -33,13 +37,15 @@ import { InboundService } from './inbound/inbound.service';
       },
     ]),
   ],
-  controllers: [WhatsappController, WhatsappEventsController],
+  controllers: [WhatsappController, WhatsappEventsController, CloudController, CloudWebhookController],
   providers: [
     BaileysProvider,
+    CloudApiProvider,
+    RoutingProvider,
+    MessageLogService,
     SessionEventsService,
     InboundPublisher,
     InboundService,
-    { provide: WHATSAPP_PROVIDER, useExisting: BaileysProvider },
   ],
 })
 export class WhatsappModule {}

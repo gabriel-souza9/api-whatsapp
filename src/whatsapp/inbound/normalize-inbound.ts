@@ -40,6 +40,53 @@ export function normalizeBaileysMessage(accountId: number, msg: any): InboundMes
   };
 }
 
+/** Item de `value.messages` do webhook `messages` da Cloud API. Reações e mensagens sem remetente são ignoradas. */
+export function normalizeCloudMessage(
+  accountId: number,
+  msg: any,
+  businessPhone?: string,
+): InboundMessageEnvelope | null {
+  if (!msg?.id || !msg.from || msg.type === 'reaction') return null;
+  const from = normalizePhone(String(msg.from));
+  if (!from) return null;
+
+  const ts = Number(msg.timestamp);
+  const base = {
+    accountId,
+    provider: 'cloud_api' as const,
+    externalMessageId: String(msg.id),
+    from,
+    to: businessPhone ? normalizePhone(businessPhone) : undefined,
+    timestamp: Number.isFinite(ts) ? ts * 1000 : Date.now(),
+    rawType: String(msg.type ?? 'unknown'),
+  };
+
+  switch (msg.type) {
+    case 'text':
+      return { ...base, type: 'text', text: msg.text?.body ? String(msg.text.body) : undefined };
+    case 'interactive': {
+      const reply = msg.interactive?.button_reply ?? msg.interactive?.list_reply;
+      return { ...base, type: 'interactive', text: reply?.title ? String(reply.title) : reply?.id };
+    }
+    case 'button':
+      return { ...base, type: 'interactive', text: msg.button?.text ?? msg.button?.payload };
+    case 'image':
+    case 'video':
+    case 'audio':
+    case 'document': {
+      const media = msg[msg.type] ?? {};
+      return {
+        ...base,
+        type: msg.type,
+        text: media.caption ? String(media.caption) : undefined,
+        media: { mimetype: media.mime_type, caption: media.caption },
+      };
+    }
+    default:
+      return { ...base, type: 'unknown' };
+  }
+}
+
 /** Baileys 7: remoteJid pode ser @lid; o telefone vem em remoteJidAlt / senderPn. */
 function resolveSenderPhone(key: any, remoteJid: string): string {
   if (remoteJid.endsWith(LID_SUFFIX)) {

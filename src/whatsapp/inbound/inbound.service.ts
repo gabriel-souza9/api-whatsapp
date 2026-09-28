@@ -4,6 +4,7 @@ import { normalizePhone } from '../../utils/normalizePhone';
 import { InboundPublisher } from './inbound.publisher';
 import { InboundMessageEnvelope } from './inbound-message.envelope';
 import { normalizeBaileysMessage } from './normalize-inbound';
+import { readAccountProvider } from '../providers/account-provider';
 
 type BotGate = { ok: boolean; expiresAt: number };
 
@@ -51,7 +52,9 @@ export class InboundService {
         }
         const envelope = normalizeBaileysMessage(accountId, msg);
         if (!envelope) continue;
-        void this.publishIfBotEnabled(envelope, sock);
+        this.publishBaileys(envelope, sock).catch((e) =>
+          this.logger.warn(`Falha ao publicar inbound conta ${accountId}: ${e?.message}`),
+        );
       } catch (e: any) {
         this.logger.warn(
           `Falha ao normalizar inbound conta ${accountId}: ${e?.message}`,
@@ -60,9 +63,22 @@ export class InboundService {
     }
   }
 
-  private async publishIfBotEnabled(envelope: InboundMessageEnvelope, sock?: any) {
-    const enriched = await this.enrichPhoneFromLid(envelope, sock);
+  /** Mensagens do webhook da Cloud API (já normalizadas). */
+  handleCloudMessages(envelopes: InboundMessageEnvelope[]) {
+    for (const envelope of envelopes) {
+      this.publishIfBotEnabled(envelope).catch((e) =>
+        this.logger.warn(`Falha ao publicar inbound conta ${envelope.accountId}: ${e?.message}`),
+      );
+    }
+  }
 
+  private async publishBaileys(envelope: InboundMessageEnvelope, sock?: any) {
+    // Conta migrada para WABA com socket Baileys ainda aberto: não responde duas vezes.
+    if ((await readAccountProvider(this.prisma, envelope.accountId)) !== 'baileys') return;
+    await this.publishIfBotEnabled(await this.enrichPhoneFromLid(envelope, sock));
+  }
+
+  private async publishIfBotEnabled(enriched: InboundMessageEnvelope) {
     this.logger.log(
       `Inbound ${enriched.externalMessageId} conta ${enriched.accountId} from=${enriched.from} chatJid=${enriched.chatJid ?? '-'}`,
     );

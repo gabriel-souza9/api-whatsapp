@@ -1,5 +1,3 @@
-export const WHATSAPP_PROVIDER = 'WHATSAPP_PROVIDER';
-
 export type SessionStatus = 'DISCONNECTED' | 'CONNECTING' | 'QR' | 'CONNECTED';
 
 export interface SessionState {
@@ -19,6 +17,16 @@ export interface SendMediaInput {
   caption?: string;
   mimetype?: string;
   fileName?: string;
+}
+
+export type AccountProvider = 'baileys' | 'waba';
+
+export interface SendTemplateInput {
+  to: string;
+  name: string;
+  language?: string;
+  /** Variáveis nomeadas do template ({{nome_cliente}} → nome_cliente) */
+  params?: Record<string, string>;
 }
 
 export interface WhatsAppProvider {

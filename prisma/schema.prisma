@@ -12,12 +12,48 @@ model WhatsappSession {
   status      String   @default("DISCONNECTED")
   qr          String?
   phoneNumber String?
+  // Cloud API (WABA). accessToken e appSecret ficam cifrados (utils/crypto).
+  wabaId        String?
+  phoneNumberId String?
+  accessToken   String?
+  appSecret     String?
+  verifyToken   String?
+  lastError     String?
+  syncedAt      DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   authKeys WhatsappAuthKey[]
 
   @@map("whatsapp_session")
+}
+
+model WhatsappMessage {
+  id              Int       @id @default(autoincrement())
+  accountId       Int
+  provider        String
+  externalId      String?   @unique
+  to              String
+  kind            String
+  origin          String
+  orderId         Int?
+  orderStatus     String?
+  templateName    String?
+  body            String
+  status          String
+  errorCode       Int?
+  errorDetail     String?
+  pricingCategory String?
+  billable        Boolean?
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  readAt          DateTime?
+  failedAt        DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([accountId, createdAt])
+  @@map("whatsapp_message")
 }
 
 model WhatsappAuthKey {
