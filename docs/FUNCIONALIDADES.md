@@ -51,6 +51,13 @@ Estados possíveis (`status`): `DISCONNECTED`, `CONNECTING`, `QR`, `CONNECTED`.
   sessões marcadas como `CONNECTED` e as reconecta automaticamente.
 - Conta com provider `waba` não reconecta pelo Baileys, e mensagem recebida pelo
   socket Baileys dessa conta não vai para o bot (evita resposta dupla).
+- `messages.upsert` com `type = notify` publica em `bot.message.inbound` se o bot
+  da conta estiver ativo. Grupo (`@g.us`), status, protocolo e reação não entram.
+- Eco de envio desta sessão (id do `sendText` / `sendMedia`, guardado 10 min,
+  mesmo sem `fromMe`) não entra e não encerra o fluxo.
+- Mensagem do número conectado pelo app (`fromMe`, ou o autor é o número da
+  sessão, e o id não é eco) entra com `handoff: true`. O cliente é o chat
+  (`remoteJid` / `remoteJidAlt`). `senderPn` e `participant` não são o cliente.
 - `DELETE /sessions/:accountId` faz logout no WhatsApp e **remove as credenciais**
   persistidas (a conta precisará escanear o QR de novo para reconectar).
 
@@ -227,8 +234,13 @@ Provider novo = implementar a interface e incluir no `RoutingProvider`.
 - `GET`: verificação da Meta (`hub.mode = subscribe` e `hub.verify_token` da conta);
   devolve `hub.challenge`.
 - `POST`: valida a assinatura, responde 200 na hora e processa em seguida.
-  - Só o campo `messages` é lido. `smb_message_echoes`, `history` e
-    `smb_app_state_sync` (coexistência) são ignorados.
+  - `messages` é lido para o cliente. `history` e `smb_app_state_sync`
+    (coexistência) são ignorados.
+  - `smb_message_echoes` (mensagem do app WhatsApp Business) entra com
+    `handoff: true`. O cliente é `message_echoes[].to`. Reação não encerra.
+    O app da Meta precisa ter o campo `smb_message_echoes` inscrito; este
+    serviço não altera a inscrição da WABA. Envio pela API só gera `statuses`,
+    então a resposta do bot não dispara handoff.
   - Evento de outro `phone_number_id` da mesma WABA é ignorado.
   - `statuses` atualizam o registro (seção 10).
   - `messages` são normalizadas (texto, botão, lista, mídia com legenda) e vão para

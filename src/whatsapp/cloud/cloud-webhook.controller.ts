@@ -16,7 +16,7 @@ import {
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
 import { InboundService } from '../inbound/inbound.service';
-import { normalizeCloudMessage } from '../inbound/normalize-inbound';
+import { normalizeCloudMessage, normalizeCloudOwnerEcho } from '../inbound/normalize-inbound';
 import { MessageLogService } from '../message-log.service';
 import { CloudApiProvider } from './cloud-api.provider';
 
@@ -79,11 +79,20 @@ export class CloudWebhookController {
   private async process(accountId: number, phoneNumberId: string, body: any) {
     for (const entry of body?.entry ?? []) {
       for (const change of entry?.changes ?? []) {
-        // smb_message_echoes, history e smb_app_state_sync (coexistência) não entram no fluxo.
-        if (change?.field !== 'messages') continue;
+        // history e smb_app_state_sync (coexistência) não entram no fluxo.
+        const field = change?.field;
+        if (field !== 'messages' && field !== 'smb_message_echoes') continue;
         const value = change.value ?? {};
         // Override é por WABA: ignora eventos de outros números da mesma WABA.
         if (value.metadata?.phone_number_id && value.metadata.phone_number_id !== phoneNumberId) continue;
+
+        if (field === 'smb_message_echoes') {
+          const echoes = (value.message_echoes ?? [])
+            .map((m: any) => normalizeCloudOwnerEcho(accountId, m))
+            .filter(Boolean);
+          if (echoes.length) this.inbound.handleCloudMessages(echoes);
+          continue;
+        }
 
         for (const status of value.statuses ?? []) {
           await this.messageLog.applyStatus(status);

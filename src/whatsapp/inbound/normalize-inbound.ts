@@ -8,8 +8,22 @@ const LID_SUFFIX = '@lid';
 const PN_SUFFIX = '@s.whatsapp.net';
 
 export function normalizeBaileysMessage(accountId: number, msg: any): InboundMessageEnvelope | null {
+  return buildBaileysEnvelope(accountId, msg, false);
+}
+
+/** Mensagem do número conectado. O cliente é o chat (`remoteJid`), não o autor. */
+export function normalizeBaileysOwnerMessage(accountId: number, msg: any): InboundMessageEnvelope | null {
+  const envelope = buildBaileysEnvelope(accountId, msg, true);
+  return envelope ? { ...envelope, handoff: true } : null;
+}
+
+function buildBaileysEnvelope(
+  accountId: number,
+  msg: any,
+  owner: boolean,
+): InboundMessageEnvelope | null {
   const key = msg?.key;
-  if (!key?.id || key.fromMe) return null;
+  if (!key?.id || (key.fromMe && !owner)) return null;
 
   const remoteJid: string = key.remoteJid || '';
   if (!remoteJid || remoteJid === STATUS_JID) return null;
@@ -22,7 +36,7 @@ export function normalizeBaileysMessage(accountId: number, msg: any): InboundMes
   if (!inner) return null;
 
   const { type, text, media, rawType } = classify(inner);
-  const from = resolveSenderPhone(key, remoteJid);
+  const from = owner ? resolveChatPhone(key, remoteJid) : resolveSenderPhone(key, remoteJid);
   if (!from) return null;
 
   const ts = Number(msg.messageTimestamp);
@@ -38,6 +52,13 @@ export function normalizeBaileysMessage(accountId: number, msg: any): InboundMes
     media,
     rawType,
   };
+}
+
+/** Eco do app WhatsApp Business (`message_echoes`). O cliente está em `to`. */
+export function normalizeCloudOwnerEcho(accountId: number, echo: any): InboundMessageEnvelope | null {
+  if (!echo?.to) return null;
+  const envelope = normalizeCloudMessage(accountId, { ...echo, from: echo.to });
+  return envelope ? { ...envelope, handoff: true } : null;
 }
 
 /** Item de `value.messages` do webhook `messages` da Cloud API. Reações e mensagens sem remetente são ignoradas. */
@@ -85,6 +106,17 @@ export function normalizeCloudMessage(
     default:
       return { ...base, type: 'unknown' };
   }
+}
+
+/** Chat da mensagem do dono. `senderPn` e `participant` são o número conectado quando fromMe. */
+function resolveChatPhone(key: any, remoteJid: string): string {
+  if (remoteJid.endsWith(LID_SUFFIX)) {
+    const alt = pickPn(key.remoteJidAlt);
+    if (alt) return alt;
+    const lidUser = remoteJid.split('@')[0]?.replace(/\D/g, '');
+    return lidUser ? `lid${lidUser}` : '';
+  }
+  return normalizePhone(remoteJid.split('@')[0]);
 }
 
 /** Baileys 7: remoteJid pode ser @lid; o telefone vem em remoteJidAlt / senderPn. */

@@ -29,4 +29,6 @@ export interface InboundMessageEnvelope {
   text?: string;
   media?: InboundMedia;
   rawType?: string;
+  /** Mensagem do número conectado pelo app. Encerra o fluxo; não segue para o Typebot. */
+  handoff?: boolean;
 }

@@ -3,7 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { normalizePhone } from '../../utils/normalizePhone';
 import { InboundPublisher } from './inbound.publisher';
 import { InboundMessageEnvelope } from './inbound-message.envelope';
-import { normalizeBaileysMessage } from './normalize-inbound';
+import { normalizeBaileysMessage, normalizeBaileysOwnerMessage } from './normalize-inbound';
 import { readAccountProvider } from '../providers/account-provider';
 
 type BotGate = { ok: boolean; expiresAt: number };
@@ -43,11 +43,17 @@ export class InboundService {
           if (text) this.logger.log(`conta ${accountId} | "${text}" | ignorada, grupo`);
           continue;
         }
-        if (this.isNotFromClient(accountId, msg, sock)) {
+        if (this.isSystemEcho(accountId, msg)) {
           const text = peekText(msg);
-          if (text) {
-            this.logger.log(`conta ${accountId} | "${text}" | ignorada, não é do cliente`);
-          }
+          if (text) this.logger.log(`conta ${accountId} | "${text}" | ignorada, eco do sistema`);
+          continue;
+        }
+        if (this.isOwnerMessage(msg, sock)) {
+          const envelope = normalizeBaileysOwnerMessage(accountId, msg);
+          if (!envelope) continue;
+          this.publishBaileys(envelope, sock).catch((e) =>
+            this.logger.warn(`Falha ao publicar handoff conta ${accountId}: ${e?.message}`),
+          );
           continue;
         }
         const envelope = normalizeBaileysMessage(accountId, msg);
@@ -145,16 +151,22 @@ export class InboundService {
     }
   }
 
-  private isNotFromClient(accountId: number, msg: any, sock?: any): boolean {
+  /** Eco do envio desta sessão. Às vezes volta sem fromMe. Não encerra o fluxo. */
+  private isSystemEcho(accountId: number, msg: any): boolean {
+    const id = msg?.key?.id;
+    if (!id) return false;
+    const sentAt = this.outgoingIds.get(`${accountId}:${id}`);
+    if (!sentAt) return false;
+    if (sentAt > Date.now()) return true;
+    this.outgoingIds.delete(`${accountId}:${id}`);
+    return false;
+  }
+
+  /** Mensagem digitada no app do número conectado. */
+  private isOwnerMessage(msg: any, sock?: any): boolean {
     const key = msg?.key;
     if (!key?.id) return false;
     if (key.fromMe) return true;
-
-    const sentAt = this.outgoingIds.get(`${accountId}:${key.id}`);
-    if (sentAt) {
-      if (sentAt > Date.now()) return true;
-      this.outgoingIds.delete(`${accountId}:${key.id}`);
-    }
 
     const mine = userDigits(sock?.user?.id, sock?.user?.lid);
     if (!mine.length) return false;
